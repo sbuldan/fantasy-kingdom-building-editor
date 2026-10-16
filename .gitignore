@@ -1,0 +1,15 @@
+# Editor-only repository. Everything is ignored unless explicitly allowed.
+/*
+!/.gitignore
+!/.gitattributes
+!/README.md
+!/Assets/
+/Assets/*
+!/Assets/Editor/
+!/Assets/Scripts/
+/Assets/Editor/*
+!/Assets/Editor/FantasyKingdomHouseBuilder.cs
+!/Assets/Editor/FantasyKingdomHouseBuilder.cs.meta
+/Assets/Scripts/*
+!/Assets/Scripts/HouseBuilderFloorMarker.cs
+!/Assets/Scripts/HouseBuilderFloorMarker.cs.meta
