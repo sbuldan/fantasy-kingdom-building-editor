@@ -44,6 +44,9 @@ public sealed class FantasyKingdomHouseBuilder : EditorWindow
     float floorOffset;
     float yaw;
     bool buildMode = true;
+    [SerializeField] bool emptyCursorMode;
+    Tool unityToolBeforeBuildMode = Tool.None;
+    bool builderOwnsUnityTool;
     bool eraseMode;
     bool pickerMode;
     bool alignToSurface;
@@ -60,6 +63,7 @@ public sealed class FantasyKingdomHouseBuilder : EditorWindow
     GameObject previewInstance;
     GameObject previewSource;
     bool floorCleanupScheduled;
+    [SerializeField] bool floorIsolationActive;
 
     [MenuItem("Tools/Fantasy Kingdom/House Builder %#h")]
     public static void Open()
@@ -86,6 +90,7 @@ public sealed class FantasyKingdomHouseBuilder : EditorWindow
         showHouseAssets = EditorPrefs.GetBool(PrefShowHouse, true);
         showCastleAssets = EditorPrefs.GetBool(PrefShowCastle, true);
         RefreshAssets();
+        SceneView.beforeSceneGui += ClaimSceneViewInput;
         SceneView.duringSceneGui += DuringSceneGUI;
         EditorApplication.update += RepaintWhilePreviewsLoad;
         EditorApplication.hierarchyChanged += ScheduleEmptyFloorCleanup;
@@ -93,10 +98,12 @@ public sealed class FantasyKingdomHouseBuilder : EditorWindow
 
     void OnDisable()
     {
+        SceneView.beforeSceneGui -= ClaimSceneViewInput;
         SceneView.duringSceneGui -= DuringSceneGUI;
         EditorApplication.update -= RepaintWhilePreviewsLoad;
         EditorApplication.hierarchyChanged -= ScheduleEmptyFloorCleanup;
         EditorApplication.delayCall -= CleanupEmptyFloorGroups;
+        RestoreUnityToolIfNeeded();
         DestroyPreview();
         EditorPrefs.SetFloat(PrefGrid, gridSize);
         EditorPrefs.SetFloat(PrefLevel, level);
@@ -109,17 +116,22 @@ public sealed class FantasyKingdomHouseBuilder : EditorWindow
 
     void OnGUI()
     {
+        if (HandleBuilderWindowShortcut(Event.current)) return;
+        int previousFloor = CurrentFloorIndex();
         EnsureStyles();
         EditorGUILayout.Space(4);
         EditorGUILayout.LabelField("POLYGON Fantasy Kingdom — House & Castle Builder", EditorStyles.boldLabel);
-        EditorGUILayout.HelpBox("P: SAMPLE UNDER CURSOR    U: TOGGLE EDITOR\nE: DELETE (BUILD ON) / UNITY ROTATE (BUILD OFF)\nA/S: ROTATE    Z/X: FLOORS    Q/W/R/T: UNITY TOOLS", MessageType.Info);
+        EditorGUILayout.HelpBox("P: SAMPLE UNDER CURSOR    U: TOGGLE EDITOR    D: EMPTY CURSOR\nI: TOGGLE FLOOR ISOLATION\nE: DELETE (BUILD ON) / UNITY ROTATE (BUILD OFF)\nA/S: ROTATE    Z/X: FLOORS    Q/W/R/T: UNITY TOOLS", MessageType.Info);
 
+        bool buildModeBeforeToolbar = buildMode;
         using (new EditorGUILayout.HorizontalScope(EditorStyles.toolbar))
         {
             buildMode = GUILayout.Toggle(buildMode, buildMode ? "BUILD MODE ON" : "BUILD MODE OFF", EditorStyles.toolbarButton, GUILayout.Width(120));
             GUILayout.FlexibleSpace();
             if (GUILayout.Button("Refresh", EditorStyles.toolbarButton, GUILayout.Width(58))) RefreshAssets();
         }
+        SyncUnityToolForBuildMode();
+        if (!buildModeBeforeToolbar && buildMode) SceneView.lastActiveSceneView?.Focus();
 
         EditorGUILayout.Space(4);
         using (new EditorGUILayout.VerticalScope(EditorStyles.helpBox))
@@ -157,6 +169,8 @@ public sealed class FantasyKingdomHouseBuilder : EditorWindow
                 if (GUILayout.Button("Frame Build")) FrameBuild();
             }
             EditorGUILayout.LabelField("Floor Organization", EditorStyles.boldLabel);
+            if (floorIsolationActive)
+                EditorGUILayout.LabelField("Isolation follows current floor", EditorStyles.miniLabel);
             using (new EditorGUILayout.HorizontalScope())
             {
                 if (GUILayout.Button("Isolate Current Floor")) IsolateCurrentFloor();
@@ -186,11 +200,81 @@ public sealed class FantasyKingdomHouseBuilder : EditorWindow
         DrawPalette();
         EditorGUILayout.EndScrollView();
 
+        if (floorIsolationActive && previousFloor != CurrentFloorIndex()) ApplyFloorIsolation();
+
         if (GUI.changed)
         {
             ApplyFilter();
             SceneView.RepaintAll();
         }
+    }
+
+    bool HandleBuilderWindowShortcut(Event e)
+    {
+        if (e.type != EventType.KeyDown || EditorGUIUtility.editingTextField ||
+            e.control || e.command || e.alt) return false;
+
+        if (e.keyCode == KeyCode.U)
+        {
+            buildMode = !buildMode;
+            SyncUnityToolForBuildMode();
+            if (buildMode) SceneView.lastActiveSceneView?.Focus();
+            e.Use();
+            Repaint();
+            return true;
+        }
+
+        if (e.keyCode == KeyCode.I)
+        {
+            if (floorIsolationActive) ShowAllFloors();
+            else IsolateCurrentFloor();
+            e.Use();
+            Repaint();
+            return true;
+        }
+
+        if (buildMode)
+        {
+            if (e.keyCode == KeyCode.D)
+            {
+                emptyCursorMode = !emptyCursorMode;
+                Repaint();
+                SceneView.RepaintAll();
+                e.Use();
+                return true;
+            }
+            if (e.keyCode == KeyCode.A) RotateSelection(-90f);
+            else if (e.keyCode == KeyCode.S) RotateSelection(90f);
+            else if (e.keyCode == KeyCode.Z) ChangeLevel(-1);
+            else if (e.keyCode == KeyCode.X) ChangeLevel(1);
+            else if (e.keyCode == KeyCode.PageUp) ChangeLevel(1);
+            else if (e.keyCode == KeyCode.PageDown) ChangeLevel(-1);
+            else if (e.keyCode == KeyCode.LeftBracket) CyclePrefab(-1);
+            else if (e.keyCode == KeyCode.RightBracket) CyclePrefab(1);
+            else return false;
+            if (e.keyCode == KeyCode.LeftBracket || e.keyCode == KeyCode.RightBracket)
+                emptyCursorMode = false;
+            e.Use();
+            return true;
+        }
+
+        if (e.keyCode == KeyCode.A) RotateSelectedObjectAroundCenter(-90f);
+        else if (e.keyCode == KeyCode.S) RotateSelectedObjectAroundCenter(90f);
+        else if (e.keyCode == KeyCode.LeftBracket) CycleSelectedObject(-1);
+        else if (e.keyCode == KeyCode.RightBracket) CycleSelectedObject(1);
+        else if (e.keyCode == KeyCode.Q) SelectUnityTool(Tool.View);
+        else if (e.keyCode == KeyCode.W) SelectUnityTool(Tool.Move);
+        else if (e.keyCode == KeyCode.R) SelectUnityTool(Tool.Scale);
+        else if (e.keyCode == KeyCode.T) SelectUnityTool(Tool.Rect);
+        else return false;
+        e.Use();
+        return true;
+    }
+
+    static void SelectUnityTool(Tool tool)
+    {
+        Tools.current = tool;
+        SceneView.lastActiveSceneView?.Focus();
     }
 
     void DrawPalette()
@@ -216,9 +300,30 @@ public sealed class FantasyKingdomHouseBuilder : EditorWindow
         }
     }
 
+    void ClaimSceneViewInput(SceneView sceneView)
+    {
+        if (!buildMode) return;
+        SyncUnityToolForBuildMode();
+        Event e = Event.current;
+        if (e.type == EventType.Layout)
+            HandleUtility.AddDefaultControl(GUIUtility.GetControlID(FocusType.Passive));
+        else if (e.type == EventType.KeyDown)
+            GUIUtility.keyboardControl = 0;
+    }
+
     void DuringSceneGUI(SceneView sceneView)
     {
+        SyncUnityToolForBuildMode();
         Event e = Event.current;
+        if (e.type == EventType.KeyDown && e.keyCode == KeyCode.I &&
+            !e.control && !e.command && !e.alt && !EditorGUIUtility.editingTextField)
+        {
+            if (floorIsolationActive) ShowAllFloors();
+            else IsolateCurrentFloor();
+            Repaint();
+            e.Use();
+            return;
+        }
         // Eyedropper and erase are immediate key actions, never persistent modes.
         pickerMode = false;
         eraseMode = false;
@@ -267,25 +372,32 @@ public sealed class FantasyKingdomHouseBuilder : EditorWindow
         bool erasing = eraseMode || temporaryErase;
 
         UpdateCursor(e.mousePosition);
-        UpdateMeshPreview(erasing || pickerMode);
+        UpdateMeshPreview(erasing || pickerMode || emptyCursorMode);
         if (showFloorGuide)
         {
             DrawFloorGuide();
             DrawVerticalRuler(sceneView);
         }
-        DrawCursor(erasing, pickerMode);
+        DrawCursor(erasing, pickerMode, emptyCursorMode);
 
         if (e.type == EventType.KeyDown)
         {
             bool plainShortcut = !e.control && !e.command && !e.alt;
             if (plainShortcut && e.keyCode == KeyCode.P)
             {
+                emptyCursorMode = false;
                 PickPrefabAt(e.mousePosition); e.Use();
                 return;
             }
             if (plainShortcut && e.keyCode == KeyCode.E)
             {
                 EraseAt(e.mousePosition); e.Use();
+                return;
+            }
+            if (plainShortcut && e.keyCode == KeyCode.D)
+            {
+                emptyCursorMode = !emptyCursorMode;
+                Repaint(); SceneView.RepaintAll(); e.Use();
                 return;
             }
             if (plainShortcut && e.keyCode == KeyCode.U)
@@ -315,17 +427,16 @@ public sealed class FantasyKingdomHouseBuilder : EditorWindow
             else if (plainShortcut && e.keyCode == KeyCode.X) { ChangeLevel(1); e.Use(); }
             else if (plainShortcut && e.keyCode == KeyCode.PageUp) { ChangeLevel(1); e.Use(); }
             else if (plainShortcut && e.keyCode == KeyCode.PageDown) { ChangeLevel(-1); e.Use(); }
-            else if (plainShortcut && e.keyCode == KeyCode.LeftBracket) { CyclePrefab(-1); e.Use(); }
-            else if (plainShortcut && e.keyCode == KeyCode.RightBracket) { CyclePrefab(1); e.Use(); }
+            else if (plainShortcut && e.keyCode == KeyCode.LeftBracket) { emptyCursorMode = false; CyclePrefab(-1); e.Use(); }
+            else if (plainShortcut && e.keyCode == KeyCode.RightBracket) { emptyCursorMode = false; CyclePrefab(1); e.Use(); }
             else if (plainShortcut && e.keyCode == KeyCode.Escape) { buildMode = false; pickerMode = false; eraseMode = false; Repaint(); e.Use(); }
         }
 
-        if (e.type == EventType.Layout) HandleUtility.AddDefaultControl(GUIUtility.GetControlID(FocusType.Passive));
         if (e.type == EventType.MouseDown && e.button == 0 && !e.alt)
         {
             if (pickerMode) PickPrefabAt(e.mousePosition);
             else if (erasing) EraseAt(e.mousePosition);
-            else PlaceSelected();
+            else if (!emptyCursorMode) PlaceSelected();
             e.Use();
         }
     }
@@ -334,28 +445,29 @@ public sealed class FantasyKingdomHouseBuilder : EditorWindow
     {
         Ray ray = HandleUtility.GUIPointToWorldRay(mousePosition);
         cursorNormal = Vector3.up;
-        Vector3 point;
-        if (Physics.Raycast(ray, out RaycastHit hit, 10000f, ~0, QueryTriggerInteraction.Ignore))
-        {
-            point = hit.point;
+        // Always project onto the active placement floor. Taking X/Z from a wall,
+        // roof, or elevated collider then forcing Y back to this floor produces a
+        // large apparent cursor offset.
+        Plane plane = new Plane(Vector3.up, new Vector3(0f, EffectiveLevel(), 0f));
+        Vector3 point = plane.Raycast(ray, out float distance) ? ray.GetPoint(distance) : Vector3.zero;
+        if (alignToSurface && Physics.Raycast(ray, out RaycastHit hit, 10000f, ~0, QueryTriggerInteraction.Ignore))
             cursorNormal = hit.normal;
-        }
-        else
-        {
-            Plane plane = new Plane(Vector3.up, new Vector3(0f, EffectiveLevel(), 0f));
-            point = plane.Raycast(ray, out float distance) ? ray.GetPoint(distance) : Vector3.zero;
-        }
         cursorPosition = new Vector3(Snap(point.x), EffectiveLevel(), Snap(point.z));
     }
 
-    void DrawCursor(bool erasing, bool picking)
+    void DrawCursor(bool erasing, bool picking, bool empty)
     {
-        Color color = picking ? new Color(.2f,.75f,1f,.95f) : erasing ? new Color(1f,.2f,.15f,.95f) : new Color(.15f,1f,.55f,.95f);
+        Color color = empty ? new Color(.15f,1f,.55f,.95f) : picking ? new Color(.2f,.75f,1f,.95f) : erasing ? new Color(1f,.2f,.15f,.95f) : new Color(.15f,1f,.55f,.95f);
         Handles.color = color;
         float radius = Mathf.Max(.15f, gridSize * .18f);
         Handles.DrawWireDisc(cursorPosition, Vector3.up, radius);
         Handles.DrawLine(cursorPosition - Vector3.right * radius, cursorPosition + Vector3.right * radius);
         Handles.DrawLine(cursorPosition - Vector3.forward * radius, cursorPosition + Vector3.forward * radius);
+        if (empty)
+        {
+            SceneView.RepaintAll();
+            return;
+        }
         if (picking)
         {
             Handles.Label(cursorPosition + Vector3.up * .25f, "EYEDROPPER — click a placed house piece", nameStyle);
@@ -613,6 +725,7 @@ public sealed class FantasyKingdomHouseBuilder : EditorWindow
         GameObject oldRoot = null;
         GameObject oldSource = null;
         bool hasReplaceableSelection = !buildMode && TryGetSelectedHousePiece(out oldRoot, out oldSource);
+        emptyCursorMode = false;
         SelectPrefab(index);
         if (hasReplaceableSelection)
         {
@@ -825,6 +938,13 @@ public sealed class FantasyKingdomHouseBuilder : EditorWindow
 
     void IsolateCurrentFloor()
     {
+        floorIsolationActive = true;
+        ApplyFloorIsolation();
+        ShowNotification(new GUIContent("Isolated " + FloorGroupName(CurrentFloorIndex())));
+    }
+
+    void ApplyFloorIsolation()
+    {
         GameObject buildRoot = GetBuildRoot(false);
         if (!buildRoot) return;
         int activeFloor = CurrentFloorIndex();
@@ -839,11 +959,11 @@ public sealed class FantasyKingdomHouseBuilder : EditorWindow
             else visibility.Hide(child.gameObject, true);
         }
         SceneView.RepaintAll();
-        ShowNotification(new GUIContent("Isolated " + FloorGroupName(activeFloor)));
     }
 
     void ShowAllFloors()
     {
+        floorIsolationActive = false;
         GameObject buildRoot = GetBuildRoot(false);
         if (!buildRoot) return;
         SceneVisibilityManager.instance.Show(buildRoot, true);
@@ -894,7 +1014,34 @@ public sealed class FantasyKingdomHouseBuilder : EditorWindow
     void ChangeLevel(int direction)
     {
         level = Mathf.Round((level + direction * levelStep) * 1000f) / 1000f;
+        if (floorIsolationActive) ApplyFloorIsolation();
         Repaint(); SceneView.RepaintAll();
+    }
+
+    void SyncUnityToolForBuildMode()
+    {
+        if (!buildMode)
+        {
+            RestoreUnityToolIfNeeded();
+            return;
+        }
+
+        if (!builderOwnsUnityTool)
+        {
+            unityToolBeforeBuildMode = Tools.current;
+            builderOwnsUnityTool = true;
+        }
+
+        // Build Mode owns Scene-view shortcuts, so Unity's transform tools must
+        // not intercept them while the builder is active.
+        if (Tools.current != Tool.None) Tools.current = Tool.None;
+    }
+
+    void RestoreUnityToolIfNeeded()
+    {
+        if (!builderOwnsUnityTool) return;
+        if (Tools.current == Tool.None) Tools.current = unityToolBeforeBuildMode;
+        builderOwnsUnityTool = false;
     }
 
     void RotateSelection(float degrees)
